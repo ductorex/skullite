@@ -1,0 +1,27 @@
+[project]
+name = "skullite"
+version = "0.1.0"
+description = "Simple SQLite high-level helper class"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/ductorex/skullite"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.13.0",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Do not complain about unused imports in __init__ files.
+"__init__.py" = ["F401"]
+
+[tool.ruff.format]
+# Collapse lines even if they contain commas
+skip-magic-trailing-comma = true
+
+[build-system]
+requires = ["hatchling >= 1.26"]
+build-backend = "hatchling.build"
