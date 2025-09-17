@@ -1,6 +1,6 @@
 [project]
 name = "skullite"
-version = "0.1.0"
+version = "0.1.0.1"
 description = "Simple SQLite high-level helper class"
 readme = "README.md"
 requires-python = ">=3.13"
