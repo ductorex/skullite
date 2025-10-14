@@ -26,10 +26,14 @@ So, we should not risk using a same cursor in different threads anymore.
 So, in current code, using a lock is useless.
 """
 
+import logging
 import sqlite3
 import sys
 from dataclasses import dataclass
-from typing import Callable, Iterable
+from typing import Callable, Generator, Iterable, Self
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True, frozen=True)
@@ -57,7 +61,7 @@ class DbID(int):
 
 
 class Skullite:
-    __slots__ = ("debug", "db_path", "functions")
+    __slots__ = ("debug", "db_path", "functions", "_persistent")
 
     def __init__(
         self,
@@ -74,6 +78,8 @@ class Skullite:
         self.debug = False
         self.db_path = db_path
         self.functions = tuple(functions)
+        # Used in context
+        self._persistent: _SkullitPersistentConnection | None = None
         if script_path is not None:
             assert script is None
             with open(script_path, mode="r", encoding="utf-8") as script_file:
@@ -84,31 +90,58 @@ class Skullite:
             with self.connect() as connection:
                 connection.script(script)
 
-    def connect(self):
-        return _SkulliteConnection(
+    def __enter__(self) -> Self:
+        """
+        Create a persistent connection.
+        This connection does not close automatically.
+        It is instead explicitly closed when exiting this object.
+        """
+        logger.info("[skullite] entering persistent connection")
+        self._persistent = _SkullitPersistentConnection(
+            self.db_path, debug=self.debug, functions=self.functions
+        )
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        logger.info("[skullite] exiting persistent connection")
+        # Explicitly close persistent connection
+        self._persistent.close()
+        # Then remove persistent object
+        self._persistent = None
+
+    def _need_persistent(self):
+        if not self._persistent:
+            raise RuntimeError(
+                "Persistent connection required. "
+                "Please use with-statement on this object first."
+            )
+
+    def connect(self) -> "_SkulliteConnection":
+        return self._persistent or _SkulliteConnection(
             self.db_path, debug=self.debug, functions=self.functions
         )
 
-    def modify(self, query, parameters=(), many=False) -> DbID:
+    def modify(self, query, parameters=(), many=False) -> DbID | None:
         with self.connect() as connection:
             return connection.modify(query, parameters, many)
 
-    def modify_many(self, query, parameters=()) -> DbID:
+    def modify_many(self, query, parameters=()) -> DbID | None:
         return self.modify(query, parameters, many=True)
 
-    def query(self, query, parameters=()):
+    def query(self, query, parameters=()) -> Generator[sqlite3.Row, None, None]:
+        self._need_persistent()
         with self.connect() as connection:
             return connection.query(query, parameters)
 
-    def query_one(self, query, parameters=()):
+    def query_one(self, query, parameters=()) -> sqlite3.Row:
         with self.connect() as connection:
             return connection.query_one(query, parameters)
 
-    def query_all(self, query, parameters=()):
+    def query_all(self, query, parameters=()) -> list[sqlite3.Row]:
         with self.connect() as connection:
             return connection.query_all(query, parameters)
 
-    def insert(self, table: str, **kwargs):
+    def insert(self, table: str, **kwargs) -> DbID | None:
         """Insert a row in a table and return new row ID."""
         columns = list(kwargs)
         values = [kwargs[column] for column in columns]
@@ -118,7 +151,7 @@ class Skullite:
             values,
         )
 
-    def insert_or_ignore(self, table: str, **kwargs):
+    def insert_or_ignore(self, table: str, **kwargs) -> DbID | None:
         """Insert a row in a table and return new row ID."""
         columns = list(kwargs)
         values = [kwargs[column] for column in columns]
@@ -128,19 +161,19 @@ class Skullite:
             values,
         )
 
-    def select_id(self, table, column, where_query, where_parameters=()):
+    def select_id(self, table, column, where_query, where_parameters=()) -> DbID | None:
         with self.connect() as connection:
             return connection.select_id(table, column, where_query, where_parameters)
 
-    def select_id_from_values(self, table, column, **values):
+    def select_id_from_values(self, table, column, **values) -> DbID | None:
         with self.connect() as connection:
             return connection.select_id_from_values(table, column, **values)
 
-    def count(self, table, column, where_query, where_parameters=()):
+    def count(self, table, column, where_query, where_parameters=()) -> int:
         with self.connect() as connection:
             return connection.count(table, column, where_query, where_parameters)
 
-    def count_from_values(self, table, column, **values):
+    def count_from_values(self, table, column, **values) -> int:
         with self.connect() as connection:
             return connection.count_from_values(table, column, **values)
 
@@ -192,7 +225,7 @@ class _SkulliteConnection:
         last_id = self.cursor.lastrowid
         return last_id if last_id is None else DbID(last_id)
 
-    def query(self, query, parameters=()):
+    def query(self, query, parameters=()) -> Generator[sqlite3.Row, None, None]:
         if self.debug:
             print(f"[query] {query}")
             print(f"[params] {parameters}")
@@ -205,11 +238,11 @@ class _SkulliteConnection:
             print(f"[params] {repr(parameters)}", file=sys.stderr)
             raise exc
 
-    def query_one(self, query, parameters=()):
+    def query_one(self, query, parameters=()) -> sqlite3.Row:
         self.cursor.execute(query, parameters)
         return self.cursor.fetchone()
 
-    def query_all(self, query, parameters=()):
+    def query_all(self, query, parameters=()) -> list[sqlite3.Row]:
         if self.debug:
             print(f"[query] {query}")
             print(f"[params] {parameters}")
@@ -254,7 +287,7 @@ class _SkulliteConnection:
         else:
             raise RuntimeError(f"Found {len(results)} entries for {table}.{column}")
 
-    def count(self, table, column, where_query, where_parameters=()):
+    def count(self, table, column, where_query, where_parameters=()) -> int:
         """Select and return count from a table."""
         assert None not in where_parameters
         self.cursor.execute(
@@ -262,7 +295,7 @@ class _SkulliteConnection:
         )
         return self.cursor.fetchone()[0]
 
-    def count_from_values(self, table, column, **values):
+    def count_from_values(self, table, column, **values) -> int:
         where_pieces = []
         where_parameters = []
         for key, value in values.items():
@@ -276,3 +309,9 @@ class _SkulliteConnection:
             f"SELECT COUNT({column}) FROM {table} WHERE {where_query}", where_parameters
         )
         return self.cursor.fetchone()[0]
+
+
+class _SkullitPersistentConnection(_SkulliteConnection):
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """No explicit exit here. We must close manually."""
+        pass
