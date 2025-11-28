@@ -65,7 +65,8 @@ class Skullite:
 
     def __init__(
         self,
-        db_path: str,
+        db_path: str | None = None,
+        /,
         *,
         script_path: str | None = None,
         script: str | None = None,
@@ -76,10 +77,16 @@ class Skullite:
         in database at given path.
         """
         self.debug = False
-        self.db_path = db_path
+        self.db_path = db_path or None
         self.functions = tuple(functions)
         # Used in context
         self._persistent: _SkullitPersistentConnection | None = None
+        # Create persistent if in memory
+        if self.db_path is None:
+            self._persistent = _SkullitPersistentConnection(
+                self.db_path, debug=self.debug, functions=self.functions
+            )
+        # Execute script if given
         if script_path is not None:
             assert script is None
             with open(script_path, mode="r", encoding="utf-8") as script_file:
@@ -92,22 +99,27 @@ class Skullite:
 
     def __enter__(self) -> Self:
         """
-        Create a persistent connection.
+        Create a persistent connection (only if not in memory).
         This connection does not close automatically.
         It is instead explicitly closed when exiting this object.
         """
         logger.info("[skullite] entering persistent connection")
-        self._persistent = _SkullitPersistentConnection(
-            self.db_path, debug=self.debug, functions=self.functions
-        )
+        if self.db_path is not None:
+            assert self._persistent is None
+            self._persistent = _SkullitPersistentConnection(
+                self.db_path, debug=self.debug, functions=self.functions
+            )
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         logger.info("[skullite] exiting persistent connection")
         # Explicitly close persistent connection
-        self._persistent.close()
-        # Then remove persistent object
-        self._persistent = None
+        # NB: Only if not in memory
+        if self.db_path is not None:
+            assert self._persistent is not None
+            self._persistent.close()
+            # Then remove persistent object
+            self._persistent = None
 
     def _need_persistent(self):
         if not self._persistent:
@@ -117,6 +129,8 @@ class Skullite:
             )
 
     def connect(self) -> "_SkulliteConnection":
+        if self.db_path is None:
+            self._need_persistent()
         return self._persistent or _SkulliteConnection(
             self.db_path, debug=self.debug, functions=self.functions
         )
@@ -182,14 +196,18 @@ class _SkulliteConnection:
     __slots__ = ("connection", "cursor", "debug")
 
     def __init__(
-        self, db_path: str, *, debug=False, functions: tuple[SkulliteFunction, ...] = ()
+        self,
+        db_path: str | None,
+        *,
+        debug=False,
+        functions: tuple[SkulliteFunction, ...] = (),
     ):
         """
         Open (or create) and populate tables (if necessary)
         in database at given path.
         """
         self.debug = debug
-        self.connection = sqlite3.connect(db_path)
+        self.connection = sqlite3.connect(db_path or ":memory:")
         self.connection.row_factory = sqlite3.Row
         self.cursor = self.connection.cursor()
         self.cursor.arraysize = 1000
