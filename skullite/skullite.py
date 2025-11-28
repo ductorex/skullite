@@ -121,6 +121,9 @@ class Skullite:
             # Then remove persistent object
             self._persistent = None
 
+    def is_persistent(self) -> bool:
+        return self._persistent is not None
+
     def _need_persistent(self):
         if not self._persistent:
             raise RuntimeError(
@@ -190,6 +193,12 @@ class Skullite:
     def count_from_values(self, table, column, **values) -> int:
         with self.connect() as connection:
             return connection.count_from_values(table, column, **values)
+
+    def copy_from(self, other: "Skullite"):
+        """Copy all tables from another database."""
+        with self.connect() as connection:
+            with other.connect() as other_connection:
+                other_connection.connection.backup(connection.connection)
 
 
 class _SkulliteConnection:
