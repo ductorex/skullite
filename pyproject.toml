@@ -11,6 +11,8 @@ Repository = "https://github.com/ductorex/skullite"
 
 [dependency-groups]
 dev = [
+    "pytest>=8.0",
+    "pytest-cov>=6.0",
     "ruff>=0.13.0",
 ]
 
@@ -21,6 +23,9 @@ dev = [
 [tool.ruff.format]
 # Collapse lines even if they contain commas
 skip-magic-trailing-comma = true
+
+[tool.pytest.ini_options]
+filterwarnings = ["ignore::ResourceWarning"]
 
 [build-system]
 requires = ["hatchling >= 1.26"]

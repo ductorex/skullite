@@ -1,1 +1,7 @@
-from .skullite import Skullite, SkulliteFunction, DbID
+from .skullite import (
+    Skullite,
+    SkulliteFunction,
+    DbID,
+    SkulliteError,
+    SkulliteLogicError,
+)

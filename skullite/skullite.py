@@ -27,6 +27,7 @@ So, in current code, using a lock is useless.
 """
 
 import logging
+import re
 import sqlite3
 import sys
 from dataclasses import dataclass
@@ -34,6 +35,26 @@ from typing import Callable, Generator, Iterable, Self
 
 
 logger = logging.getLogger(__name__)
+
+
+_IDENTIFIER_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+
+
+def _safe_id(name: str, *, allow_star: bool = False) -> str:
+    """Validate and quote a SQL identifier (table or column name)."""
+    if allow_star and name == "*":
+        return "*"
+    if not _IDENTIFIER_RE.match(name):
+        raise SkulliteError(f"Invalid SQL identifier: {name!r}")
+    return f'"{name}"'
+
+
+class SkulliteError(Exception):
+    pass
+
+
+class SkulliteLogicError(SkulliteError):
+    """Potential Skullite internal error."""
 
 
 @dataclass(slots=True, frozen=True)
@@ -62,9 +83,9 @@ class DbID(int):
 
 class Skullite:
     __slots__ = (
-        "debug",
-        "db_path",
-        "functions",
+        "_debug",
+        "_db_path",
+        "_functions",
         "_persistent",
         "_persistent_is_required",
     )
@@ -83,24 +104,24 @@ class Skullite:
         Open (or create) and populate tables (if necessary)
         in database at given path.
         """
-        self.debug = False
-        self.db_path = db_path or None
-        self.functions = tuple(functions)
+        self._debug = False
+        self._db_path = db_path or None
+        self._functions = tuple(functions)
         # Used in context
         self._persistent: _SkullitPersistentConnection | None = None
         self._persistent_is_required = bool(persistent)
         # Create persistent if in memory or persistent requested
-        if self.db_path is None or self._persistent_is_required:
+        if self._db_path is None or self._persistent_is_required:
             self._persistent = _SkullitPersistentConnection(
-                self.db_path, debug=self.debug, functions=self.functions
+                self._db_path, debug=self._debug, functions=self._functions
             )
         # Execute script if given
         if script_path is not None:
-            assert script is None
+            if script is not None:
+                raise SkulliteError("script_path and script are mutually exclusive")
             with open(script_path, mode="r", encoding="utf-8") as script_file:
                 script = script_file.read()
-        elif script is not None:
-            assert script_path is None
+
         if script is not None:
             with self.connect() as connection:
                 connection.script(script)
@@ -113,12 +134,18 @@ class Skullite:
         It is instead explicitly closed when exiting this object.
         """
         logger.info("[skullite] entering persistent connection")
-        if self.db_path is None or self._persistent_is_required:
-            assert self._persistent is not None
+        if self._db_path is None or self._persistent_is_required:
+            if self._persistent is None:
+                raise SkulliteLogicError(
+                    "Persistent expected if in-memory or explicitly required."
+                )
         else:
-            assert self._persistent is None
+            if self._persistent is not None:
+                raise SkulliteLogicError(
+                    "Persistent not expected if on-disk and not explicitly required."
+                )
             self._persistent = _SkullitPersistentConnection(
-                self.db_path, debug=self.debug, functions=self.functions
+                self._db_path, debug=self._debug, functions=self._functions
             )
         return self
 
@@ -126,27 +153,31 @@ class Skullite:
         logger.info("[skullite] exiting persistent connection")
         # Explicitly close persistent connection
         # NB: Only if not in memory and persistent not requested
-        assert self._persistent is not None
-        if self.db_path is not None and not self._persistent_is_required:
+        if self._persistent is None:
+            raise SkulliteLogicError("Persistent expected when exiting a context.")
+        if self._db_path is not None and not self._persistent_is_required:
             self._persistent.close()
             # Then remove persistent object
             self._persistent = None
+
+    def in_memory(self) -> bool:
+        return self._db_path is None
 
     def is_persistent(self) -> bool:
         return self._persistent is not None
 
     def _need_persistent(self):
         if not self._persistent:
-            raise RuntimeError(
+            raise SkulliteError(
                 "Persistent connection required. "
                 "Please use with-statement on this object first."
             )
 
     def connect(self) -> "_SkulliteConnection":
-        if self.db_path is None or self._persistent_is_required:
+        if self._db_path is None or self._persistent_is_required:
             self._need_persistent()
         return self._persistent or _SkulliteConnection(
-            self.db_path, debug=self.debug, functions=self.functions
+            self._db_path, debug=self._debug, functions=self._functions
         )
 
     def modify(self, query, parameters=(), many=False) -> DbID | None:
@@ -174,7 +205,7 @@ class Skullite:
         columns = list(kwargs)
         values = [kwargs[column] for column in columns]
         return self.modify(
-            f"INSERT INTO {table} ({', '.join(columns)}) "
+            f"INSERT INTO {_safe_id(table)} ({', '.join(_safe_id(c) for c in columns)}) "
             f"VALUES ({', '.join('?' * len(columns))})",
             values,
         )
@@ -184,7 +215,7 @@ class Skullite:
         columns = list(kwargs)
         values = [kwargs[column] for column in columns]
         return self.modify(
-            f"INSERT OR IGNORE INTO {table} ({', '.join(columns)}) "
+            f"INSERT OR IGNORE INTO {_safe_id(table)} ({', '.join(_safe_id(c) for c in columns)}) "
             f"VALUES ({', '.join('?' * len(columns))})",
             values,
         )
@@ -292,9 +323,15 @@ class _SkulliteConnection:
         Select one ID from a table and return it if found, else None.
         If more than 1 ID is found, raise a RuntimeError.
         """
-        assert None not in where_parameters
+        if None in where_parameters:
+            raise SkulliteError(
+                "None not allowed in parameters. Instead use `field=None` in select_id_from_values"
+            )
+        safe_table = _safe_id(table)
+        safe_column = _safe_id(column)
         self.cursor.execute(
-            f"SELECT {column} FROM {table} WHERE {where_query}", where_parameters
+            f"SELECT {safe_column} FROM {safe_table} WHERE {where_query}",
+            where_parameters,
         )
         results = self.cursor.fetchall()
         if len(results) == 0:
@@ -305,17 +342,21 @@ class _SkulliteConnection:
             raise RuntimeError(f"Found {len(results)} entries for {table}.{column}")
 
     def select_id_from_values(self, table, column, **values) -> DbID | None:
+        safe_table = _safe_id(table)
+        safe_column = _safe_id(column)
         where_pieces = []
         where_parameters = []
         for key, value in values.items():
+            safe_key = _safe_id(key)
             if value is None:
-                where_pieces.append(f"{key} IS NULL")
+                where_pieces.append(f"{safe_key} IS NULL")
             else:
-                where_pieces.append(f"{key} = ?")
+                where_pieces.append(f"{safe_key} = ?")
                 where_parameters.append(value)
         where_query = " AND ".join(where_pieces)
         self.cursor.execute(
-            f"SELECT {column} FROM {table} WHERE {where_query}", where_parameters
+            f"SELECT {safe_column} FROM {safe_table} WHERE {where_query}",
+            where_parameters,
         )
         results = self.cursor.fetchall()
         if len(results) == 0:
@@ -327,24 +368,34 @@ class _SkulliteConnection:
 
     def count(self, table, column, where_query, where_parameters=()) -> int:
         """Select and return count from a table."""
-        assert None not in where_parameters
+        if None in where_parameters:
+            raise SkulliteError(
+                "None not allowed in parameters. Instead use `field=None` in count_from_values"
+            )
+        safe_table = _safe_id(table)
+        safe_column = _safe_id(column, allow_star=True)
         self.cursor.execute(
-            f"SELECT COUNT({column}) FROM {table} WHERE {where_query}", where_parameters
+            f"SELECT COUNT({safe_column}) FROM {safe_table} WHERE {where_query}",
+            where_parameters,
         )
         return self.cursor.fetchone()[0]
 
     def count_from_values(self, table, column, **values) -> int:
+        safe_table = _safe_id(table)
+        safe_column = _safe_id(column, allow_star=True)
         where_pieces = []
         where_parameters = []
         for key, value in values.items():
+            safe_key = _safe_id(key)
             if value is None:
-                where_pieces.append(f"{key} IS NULL")
+                where_pieces.append(f"{safe_key} IS NULL")
             else:
-                where_pieces.append(f"{key} = ?")
+                where_pieces.append(f"{safe_key} = ?")
                 where_parameters.append(value)
         where_query = " AND ".join(where_pieces)
         self.cursor.execute(
-            f"SELECT COUNT({column}) FROM {table} WHERE {where_query}", where_parameters
+            f"SELECT COUNT({safe_column}) FROM {safe_table} WHERE {where_query}",
+            where_parameters,
         )
         return self.cursor.fetchone()[0]
 
