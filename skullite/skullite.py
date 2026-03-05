@@ -160,6 +160,10 @@ class Skullite:
             # Then remove persistent object
             self._persistent = None
 
+    @property
+    def db_path(self) -> str | None:
+        return self._db_path
+
     def in_memory(self) -> bool:
         return self._db_path is None
 

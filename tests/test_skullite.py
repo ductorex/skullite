@@ -61,6 +61,7 @@ class TestSkulliteInMemory:
 
     def test_empty_string_is_in_memory(self):
         db = Skullite("")
+        assert db.db_path is None
         assert db.in_memory()
         assert db.is_persistent()
 
@@ -219,6 +220,7 @@ class TestSkulliteFileBased:
         db = Skullite(str(tmp_path / "test.db"), script=SCHEMA)
         assert not db.is_persistent()
         assert not db.in_memory()
+        assert db.db_path is not None
 
     def test_context_manager(self, tmp_path):
         db = Skullite(str(tmp_path / "test.db"), script=SCHEMA)
