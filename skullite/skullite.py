@@ -85,6 +85,7 @@ class Skullite:
     __slots__ = (
         "_debug",
         "_db_path",
+        "_foreign_keys",
         "_functions",
         "_persistent",
         "_persistent_is_required",
@@ -99,6 +100,7 @@ class Skullite:
         script: str | None = None,
         functions: Iterable[SkulliteFunction] = (),
         persistent: bool = False,
+        foreign_keys: bool = True,
     ):
         """
         Open (or create) and populate tables (if necessary)
@@ -106,6 +108,7 @@ class Skullite:
         """
         self._debug = False
         self._db_path = db_path or None
+        self._foreign_keys = foreign_keys
         self._functions = tuple(functions)
         # Used in context
         self._persistent: _SkullitPersistentConnection | None = None
@@ -113,7 +116,10 @@ class Skullite:
         # Create persistent if in memory or persistent requested
         if self._db_path is None or self._persistent_is_required:
             self._persistent = _SkullitPersistentConnection(
-                self._db_path, debug=self._debug, functions=self._functions
+                self._db_path,
+                debug=self._debug,
+                functions=self._functions,
+                foreign_keys=self._foreign_keys,
             )
         # Execute script if given
         if script_path is not None:
@@ -145,7 +151,10 @@ class Skullite:
                     "Persistent not expected if on-disk and not explicitly required."
                 )
             self._persistent = _SkullitPersistentConnection(
-                self._db_path, debug=self._debug, functions=self._functions
+                self._db_path,
+                debug=self._debug,
+                functions=self._functions,
+                foreign_keys=self._foreign_keys,
             )
         return self
 
@@ -181,7 +190,10 @@ class Skullite:
         if self._db_path is None or self._persistent_is_required:
             self._need_persistent()
         return self._persistent or _SkulliteConnection(
-            self._db_path, debug=self._debug, functions=self._functions
+            self._db_path,
+            debug=self._debug,
+            functions=self._functions,
+            foreign_keys=self._foreign_keys,
         )
 
     def modify(self, query, parameters=(), many=False) -> DbID | None:
@@ -256,6 +268,7 @@ class _SkulliteConnection:
         *,
         debug=False,
         functions: tuple[SkulliteFunction, ...] = (),
+        foreign_keys: bool = True,
     ):
         """
         Open (or create) and populate tables (if necessary)
@@ -264,6 +277,8 @@ class _SkulliteConnection:
         self.debug = debug
         self.connection = sqlite3.connect(db_path or ":memory:")
         self.connection.row_factory = sqlite3.Row
+        if foreign_keys:
+            self.connection.execute("PRAGMA foreign_keys=ON")
         self.cursor = self.connection.cursor()
         self.cursor.arraysize = 1000
 
