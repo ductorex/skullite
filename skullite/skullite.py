@@ -1,8 +1,33 @@
 """
 Helper class to use a SQLite database file.
 
-NB: About cursors and threads
------------------------------
+Thread safety
+-------------
+
+Each Skullite instance stores its persistent connection in a
+``threading.local()``, so every thread gets its own independent
+SQLite connection. This means:
+
+- Multiple threads can use ``with db:`` concurrently on the same
+  Skullite instance without conflict.
+- Operations that don't require ``with db:`` (``insert``, ``modify``,
+  ``query_all``, ``query_one``, etc.) create a temporary connection
+  per call when no persistent connection exists for the current thread.
+- ``query()`` still requires an active ``with db:`` context, but only
+  for the calling thread.
+
+For on-disk databases, SQLite itself handles file-level locking.
+Concurrent reads are always safe; concurrent writes are serialized
+by SQLite (consider enabling WAL mode for better write concurrency).
+
+For in-memory databases, the persistent connection is created on the
+init thread and is only visible from that thread (SQLite enforces
+``check_same_thread=True`` by default).
+
+NB: About cursors and threads in SQLite
+---------------------------------------
+
+(Legacy information, important for understanding)
 
 SQLite does not like sharing cursors across threads.
 If one wants to use a same cursor in many threads, one should:
@@ -21,7 +46,8 @@ The object was created in thread id <> and this is thread id <>.
 and use this lock whenever a SQL query is executed.
 
 This was the strategy in older versions of this module.
-However, this current code, we create a new cursor for each request.
+However, this current code, we create a new cursor
+from a new thread-safe connection for each request.
 So, we should not risk using a same cursor in different threads anymore.
 So, in current code, using a lock is useless.
 """
@@ -30,6 +56,7 @@ import logging
 import re
 import sqlite3
 import sys
+import threading
 from dataclasses import dataclass
 from typing import Callable, Generator, Iterable, Self
 
@@ -87,9 +114,17 @@ class Skullite:
         "_db_path",
         "_foreign_keys",
         "_functions",
-        "_persistent",
         "_persistent_is_required",
+        "_thread_local",
     )
+
+    @property
+    def _persistent(self) -> "_SkullitPersistentConnection | None":
+        return getattr(self._thread_local, "persistent", None)
+
+    @_persistent.setter
+    def _persistent(self, value: "_SkullitPersistentConnection | None"):
+        self._thread_local.persistent = value
 
     def __init__(
         self,
@@ -110,8 +145,7 @@ class Skullite:
         self._db_path = db_path or None
         self._foreign_keys = foreign_keys
         self._functions = tuple(functions)
-        # Used in context
-        self._persistent: _SkullitPersistentConnection | None = None
+        self._thread_local = threading.local()
         self._persistent_is_required = bool(persistent)
         # Create persistent if in memory or persistent requested
         if self._db_path is None or self._persistent_is_required:
