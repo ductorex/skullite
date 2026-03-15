@@ -90,12 +90,13 @@ for row in db.query("SELECT * FROM users"):  # query() works without `with`
 
 ### Thread safety
 
-SQLite does not allow a connection to be used from a thread other than the one that created it (`check_same_thread=True` by default). This has implications for Skullite:
+Skullite stores persistent connections in a `threading.local()`, so each thread automatically gets its own independent SQLite connection. This means:
 
-- **Ephemeral mode** (file-based, default): each operation creates its own connection, so each thread naturally gets its own. This is inherently thread-safe — multiple threads can call `db.insert()`, `db.query_all()`, etc. concurrently without issues.
-- **Persistent mode** (in-memory, `persistent=True`, or inside a `with` block): a single connection is reused for all operations. Using it from a different thread than the one that created it will raise `sqlite3.ProgrammingError`.
+- **Ephemeral mode** (file-based, default): each operation creates its own connection, so each thread naturally gets its own. This is inherently thread-safe.
+- **Persistent mode** (file-based, `persistent=True` or inside a `with` block): each thread gets its own persistent connection via `threading.local()`. Multiple threads can use `with db:` concurrently on the same `Skullite` instance without conflict.
+- **In-memory**: the persistent connection is created on the init thread and is only visible from that thread (SQLite enforces `check_same_thread=True` by default). In-memory databases are single-thread only.
 
-If your application is multi-threaded and uses a file-based database, the default ephemeral mode is the safest choice.
+For on-disk databases, SQLite itself handles file-level locking. Concurrent reads are always safe; concurrent writes are serialized by SQLite (consider enabling WAL mode for better write concurrency).
 
 ### Summary
 
@@ -103,8 +104,8 @@ If your application is multi-threaded and uses a file-based database, the defaul
 |------|---------------------|-------------|
 | In-memory (no `db_path`) | Always persistent. | No — single thread only. |
 | File-based (default) | Ephemeral. Each operation opens/closes its own connection. | Yes — each thread gets its own connection. |
-| File-based + `with db:` | Persistent for the duration of the `with` block. | No — single thread only. |
-| File-based + `persistent=True` | Always persistent, like an in-memory database. | No — single thread only. |
+| File-based + `with db:` | Persistent for the duration of the `with` block (per thread). | Yes — each thread gets its own persistent connection. |
+| File-based + `persistent=True` | Always persistent (per thread). | Yes — each thread gets its own persistent connection. |
 
 ### Checking connection state
 
@@ -132,6 +133,14 @@ db = Skullite(script="CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT);")
 ```
 
 `script` and `script_path` are mutually exclusive. Providing both raises `SkulliteError`.
+
+### Foreign keys
+
+Foreign keys are enabled by default (`PRAGMA foreign_keys=ON` is executed on every new connection). To disable them:
+
+```python
+db = Skullite("app.db", foreign_keys=False)
+```
 
 ### Custom SQLite functions
 
@@ -273,49 +282,3 @@ db.insert("users; DROP TABLE users", name="Alice")
 ```
 
 Note: `modify`, `query`, `query_one`, and `query_all` accept raw SQL strings. Use parameterized queries (`?` placeholders) for values to prevent injection.
-
-## Alternatives
-
-If Skullite doesn't fit your needs, here are some alternatives with their trade-offs.
-
-### vs [sqlite-utils](https://github.com/simonw/sqlite-utils)
-
-Feature-rich SQLite wrapper with a CLI tool. The closest to Skullite in philosophy.
-
-- **sqlite-utils advantages:** much more features (table transforms, extracts, full-text search, CLI), larger community, better documented.
-- **Skullite advantages:** zero dependencies (sqlite-utils depends on `click`, `sqlite-fts4`, `tabulate`, etc.), built-in thread safety via ephemeral connections (sqlite-utils uses a single persistent connection, not thread-safe), `DbID` truthy-zero pattern.
-
-### vs [Peewee](https://github.com/coleifer/peewee)
-
-Lightweight ORM with models, migrations, and relationships.
-
-- **Peewee advantages:** full ORM (model classes, foreign keys, joins, migrations), thread-safe via thread-local connections (one persistent connection per thread — more performant than ephemeral connections), supports PostgreSQL and MySQL.
-- **Skullite advantages:** no ORM layer (simpler for projects that don't need models), zero dependencies, no schema defined in Python code (schema stays in SQL where it belongs).
-
-### vs [SQLAlchemy Core](https://www.sqlalchemy.org/) / [dataset](https://github.com/pudo/dataset)
-
-Industry-standard SQL toolkit. dataset is a thin wrapper on top of SQLAlchemy.
-
-- **SQLAlchemy advantages:** connection pooling (most performant multi-threading strategy), supports all major databases, mature ecosystem, full SQL expression language.
-- **Skullite advantages:** zero dependencies (SQLAlchemy is a large dependency), trivial to learn (no engine/session/pool concepts), better suited for small scripts and projects where SQLite is all you need.
-
-### vs [aiosqlite](https://github.com/omnilib/aiosqlite)
-
-Async wrapper for sqlite3, designed for asyncio applications.
-
-- **aiosqlite advantages:** async/await support, integrates with asyncio event loops.
-- **Skullite advantages:** simpler synchronous API, no async overhead for non-async applications. Different niche — aiosqlite is for async code, Skullite is for synchronous code.
-
-### Multi-threading comparison
-
-| Library | Multi-threading strategy | Trade-off |
-|---------|--------------------------|-----------|
-| **Skullite** | Ephemeral connections (one per operation) | Simple and safe, but connection open/close overhead per operation. |
-| **sqlite-utils** | Single persistent connection | Not thread-safe. Must create one `Database` per thread manually. |
-| **Peewee** | Thread-local connections | Best of both worlds: persistent + thread-safe. But requires an ORM. |
-| **SQLAlchemy / dataset** | Connection pool | Most performant. But heavyweight dependency. |
-| **aiosqlite** | Single thread + async | Designed for asyncio, not traditional multi-threading. |
-
-### What distinguishes Skullite
-
-Skullite is best suited for projects that want a thin wrapper over `sqlite3` with **zero dependencies**, **implicit thread safety**, and **no conceptual overhead** (no ORM, no engine, no pool, no models). The trade-off is fewer features and slightly more overhead per operation compared to pooling or thread-local strategies.
